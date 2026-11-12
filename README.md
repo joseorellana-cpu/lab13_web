@@ -1,129 +1,134 @@
-# Microservicios: Comunicación entre Servicios (Eureka + OpenFeign)
+# Microservicios: Service Discovery y API Gateway
 
-Sistema de pedidos con cinco proyectos Spring Boot. Cada servicio tiene su propia base de
-datos MySQL, se registra en **Eureka** y se comunica con los demás **solo por REST mediante
-OpenFeign**, usando el nombre lógico con el que está registrado. No hay relaciones JPA entre
-servicios ni consultas a bases de datos ajenas.
+Sistema de pedidos con **seis proyectos Spring Boot**. Todos los clientes externos (Postman,
+frontend) entran por un único punto, el **API Gateway (8080)**. El gateway consulta a
+**Eureka (8761)** y enruta cada petición al microservicio que corresponde. Cada
+microservicio tiene su propia base de datos MySQL y se comunica con los demás **solo por REST
+mediante OpenFeign**, usando el nombre lógico registrado en Eureka.
+
+## Arquitectura
 
 ```
-                    ┌──────────────────────┐
-                    │  eureka-server :8761 │  ← registro y descubrimiento
-                    └──────────▲───────────┘
-        ┌───────────────┬──────┴────────┬────────────────┐
-categoria-service   producto-service   cliente-service   pedido-service
-     :8082      ◄─Feign─   :8083            :8084     ─Feign─► cliente / producto
- bd_categoria_dev    bd_producto_dev   bd_cliente_dev     bd_pedido_dev  :8085
+                         Cliente (Postman / Frontend)
+                                     │  http://localhost:8080/api/...
+                                     ▼
+                       ┌───────────────────────────┐
+                       │   gateway-service :8080   │  enrutamiento por Path + lb://
+                       └─────────────┬─────────────┘
+                                     │ consulta instancias
+                       ┌─────────────▼─────────────┐
+                       │   eureka-server  :8761    │  registro y descubrimiento
+                       └─────────────▲─────────────┘
+              ┌──────────────┬───────┴───────┬──────────────┐  (todos se registran)
+              │              │               │              │
+     categoria-service  producto-service  cliente-service  pedido-service
+          :8082     ◄─Feign─   :8083          :8084     ─Feign─►  :8085
+     bd_categoria_dev   bd_producto_dev   bd_cliente_dev    bd_pedido_dev
+                                                  ▲               │
+                                                  └─────Feign─────┘ (cliente y producto)
 ```
+
+| Componente | Rol |
+|---|---|
+| **Eureka Server** | Registro de servicios. Cada instancia se registra con su `spring.application.name`. |
+| **API Gateway** | Punto de entrada único. Enruta según el `Path` hacia `lb://nombre-servicio`, y Spring Cloud LoadBalancer elige la instancia. |
+| **Microservicios** | Lógica de negocio y persistencia propias (*database per service*). |
+| **OpenFeign** | Comunicación interna entre servicios por nombre lógico. |
 
 ## Tecnologías
 - Java 17, Spring Boot 3.5.14, Spring Cloud 2025.0.0
+- Spring Cloud Gateway (WebFlux), Spring Cloud LoadBalancer, Spring Boot Actuator
+- Netflix Eureka Server / Client, Spring Cloud OpenFeign
 - Spring Web, Spring Data JPA, Bean Validation, Lombok
-- Netflix Eureka Server / Client, Spring Cloud OpenFeign (con LoadBalancer)
 - MySQL 8 (también probado con MariaDB 10.4 de XAMPP)
 - Maven (se incluye `mvnw` en cada proyecto)
 
 ## Requisitos
 - JDK 17 o superior (probado con JDK 21)
 - MySQL en `localhost:3306`, usuario `root` y contraseña vacía
-- Postman (o curl) para las pruebas
+- Puertos libres: 8761, 8080 y 8082 a 8085
+- Postman (o curl)
 
 ## Servicios y puertos
 | Servicio | Puerto | Base de datos | Consume a |
 |---|---|---|---|
 | eureka-server | 8761 | — | — |
+| gateway-service | **8080** | — | todos (vía `lb://`) |
 | categoria-service | 8082 | bd_categoria_dev | — |
 | producto-service | 8083 | bd_producto_dev | categoria-service |
 | cliente-service | 8084 | bd_cliente_dev | — |
 | pedido-service | 8085 | bd_pedido_dev | cliente-service, producto-service |
-
-## Configuración
-- `application.yaml` activa el perfil `dev` (`spring.profiles.active: dev`).
-- `application-dev.yml` define el puerto, el nombre, el datasource, `ddl-auto: update`,
-  `show-sql: true`, `empresa.ambiente: desarrollo` y el registro en Eureka
-  (`http://localhost:8761/eureka`).
-- Las tablas las crea Hibernate al arrancar.
 
 ## Puesta en marcha
 1. Crear las bases de datos:
    ```bash
    mysql -u root < database/crear_bases.sql
    ```
-   (La URL JDBC también incluye `createDatabaseIfNotExist=true`.)
 2. Levantar los servicios **en este orden**, cada uno en su propia terminal (o con Run en el IDE):
    1. `eureka-server`
    2. `categoria-service`
    3. `producto-service`
    4. `cliente-service`
    5. `pedido-service`
+   6. `gateway-service`
    ```bash
    cd eureka-server && ./mvnw spring-boot:run
    ```
-3. Abrir http://localhost:8761 y comprobar que aparecen las 4 instancias registradas.
-   Los servicios tardan unos 30 segundos en ser visibles para Feign tras registrarse.
+3. Abrir http://localhost:8761 y comprobar que aparecen las **5 instancias**: CATEGORIA, PRODUCTO,
+   CLIENTE, PEDIDO y GATEWAY.
+4. Esperar unos 30 segundos tras el registro: el gateway refresca su caché de instancias
+   periódicamente. Si se adelanta, responderá `503`.
 
-## Endpoints
+## Rutas expuestas por el gateway (puerto 8080)
 
-### categoria-service (8082)
-| Método | Ruta | Descripción |
+### Rutas explícitas (`spring.cloud.gateway.routes`)
+| Id | Predicado `Path` | Destino |
 |---|---|---|
-| POST | /api/categorias | Crear (nombre obligatorio, estado ACTIVO/INACTIVO, por defecto ACTIVO) |
-| GET | /api/categorias | Listar |
-| GET | /api/categorias/{id} | Obtener |
-| PUT | /api/categorias/{id} | Actualizar |
-| DELETE | /api/categorias/{id} | Eliminar |
+| categoria-service | `/api/categorias/**` | `lb://categoria-service` |
+| producto-service | `/api/productos/**` | `lb://producto-service` |
+| cliente-service | `/api/clientes/**` | `lb://cliente-service` |
+| pedido-service | `/api/pedidos/**` | `lb://pedido-service` |
 
-### producto-service (8083)
-| Método | Ruta | Descripción |
+### Rutas automáticas (discovery locator)
+Con `discovery.locator.enabled: true` y `lower-case-service-id: true`, cada servicio de Eureka
+también responde con su nombre como prefijo:
+`http://localhost:8080/{nombre-servicio}/...`, por ejemplo
+`http://localhost:8080/pedido-service/api/pedidos/1`.
+
+### Endpoints de negocio (todos vía `http://localhost:8080`)
+| Servicio | Método | Ruta |
 |---|---|---|
-| POST | /api/productos | Crear (valida la categoría vía Feign; nombre obligatorio, precio > 0) |
-| GET | /api/productos | Listar con su categoría |
-| GET | /api/productos/{id} | Obtener con su categoría |
-| PUT | /api/productos/{id} | Actualizar |
-| DELETE | /api/productos/{id} | Eliminar |
+| categoria | POST, GET | `/api/categorias` |
+| categoria | GET, PUT, DELETE | `/api/categorias/{id}` |
+| producto | POST, GET | `/api/productos` |
+| producto | GET, PUT, DELETE | `/api/productos/{id}` |
+| cliente | POST, GET | `/api/clientes` |
+| cliente | GET, PUT, DELETE | `/api/clientes/{id}` |
+| pedido | POST, GET | `/api/pedidos` |
+| pedido | GET | `/api/pedidos/{id}` (pedido + cliente + producto) |
+| pedido | PUT | `/api/pedidos/{id}/anular`, `/pendiente`, `/atender` |
 
-### cliente-service (8084)
-| Método | Ruta | Descripción |
-|---|---|---|
-| POST | /api/clientes | Registrar (todos los campos obligatorios, `nroDni` de 8 dígitos y único) |
-| GET | /api/clientes | Listar |
-| GET | /api/clientes/{id} | Consultar por código |
-| PUT | /api/clientes/{id} | Actualizar |
-| DELETE | /api/clientes/{id} | Eliminar |
+Los pedidos no se eliminan: no existe DELETE.
 
-### pedido-service (8085)
-| Método | Ruta | Descripción |
-|---|---|---|
-| POST | /api/pedidos | Registrar (valida cliente y producto vía Feign; estado inicial PENDIENTE) |
-| GET | /api/pedidos | Listar con cliente y producto |
-| GET | /api/pedidos/{id} | Obtener pedido completo |
-| PUT | /api/pedidos/{id}/anular | Cambiar a ANULADO |
-| PUT | /api/pedidos/{id}/pendiente | Cambiar a PENDIENTE |
-| PUT | /api/pedidos/{id}/atender | Cambiar a ATENDIDO |
+### Monitoreo del gateway (Actuator)
+- `GET http://localhost:8080/actuator/health`: estado del gateway
+- `GET http://localhost:8080/actuator/gateway/routes`: rutas cargadas (explícitas y automáticas)
 
-Los pedidos no se eliminan: no existe DELETE y la ruta responde 405.
-
-Ejemplo de `GET /api/pedidos/1`:
-```json
-{"id":1,"cantidad":2,"cliente":{"id":1,"nombre":"Carlos","apellido":"Ramirez"},"producto":{"id":1,"nombre":"Laptop","precio":2500},"estado":"PENDIENTE"}
-```
-
-Los bodies de Postman están en [postman/peticiones.md](postman/peticiones.md).
+Las URLs de prueba y los bodies de Postman están en [postman/peticiones.md](postman/peticiones.md).
 
 ## Manejo de errores
-Cada servicio tiene un `@RestControllerAdvice` global que responde en JSON:
-```json
-{"timestamp":"...","status":400,"error":"Bad Request","mensaje":"Error de validación en los datos enviados",
- "ruta":"/api/pedidos","errores":{"cantidad":"La cantidad debe ser mayor a cero"}}
-```
+Cada microservicio tiene un `@RestControllerAdvice` global. El gateway reenvía las respuestas
+sin modificarlas:
+
 | Código | Caso |
 |---|---|
 | 400 | Validación (`@Valid`), JSON mal formado o parámetro inválido |
-| 404 | Recurso inexistente, local o en el servicio remoto |
+| 404 | Recurso inexistente (local o remoto), o ruta no publicada en el gateway |
 | 405 | Método no permitido (ej. DELETE de pedidos) |
 | 409 | DNI de cliente duplicado |
-| 503 | Servicio dependiente caído o no registrado en Eureka (Feign) |
+| 503 | Servicio caído o aún no registrado en Eureka |
 
-## Estructura de paquetes (por servicio)
+## Estructura de paquetes
 ```
 com.tecsup.<servicio>
 ├── model        entidades JPA
@@ -133,10 +138,17 @@ com.tecsup.<servicio>
 ├── controller   controladores REST
 ├── client       interfaces @FeignClient (solo producto y pedido)
 └── exception    excepción 404 y @RestControllerAdvice
+
+com.tecsup.gateway_service
+└── GatewayServiceApplication   (toda la configuración está en application.yaml)
 ```
 
 ## Notas
+- **Nombres en Spring Cloud 2025.0.0:** al arrancar, el gateway muestra avisos de obsolescencia.
+  El laboratorio usa `spring-cloud-starter-gateway` y las claves `spring.cloud.gateway.*`, que
+  siguen funcionando porque el Gateway las traduce automáticamente. Sus equivalentes nuevos son
+  `spring-cloud-starter-gateway-server-webflux` y `spring.cloud.gateway.server.webflux.*`.
 - Con MariaDB (XAMPP), Hibernate muestra el aviso `HHH000511` sobre la versión 5.5.5. No afecta
-  al funcionamiento del laboratorio.
-- Las pruebas `*ApplicationTests` de Initializr levantan el contexto completo y necesitan MySQL
-  encendido. Para compilar sin ejecutarlas: `./mvnw package -DskipTests`.
+  al laboratorio.
+- Las pruebas `*ApplicationTests` levantan el contexto completo y necesitan MySQL encendido.
+  Para compilar sin ejecutarlas: `./mvnw package -DskipTests`.

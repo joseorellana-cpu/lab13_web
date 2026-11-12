@@ -1,0 +1,61 @@
+# ===== API Gateway =====
+server:
+  port: 8080
+
+spring:
+  application:
+    name: gateway-service
+  cloud:
+    gateway:
+      discovery:
+        locator:
+          # Crea rutas automáticas por cada servicio de Eureka:
+          # http://localhost:8080/{nombre-servicio}/... (ej. /pedido-service/api/pedidos/1)
+          enabled: true
+          # Usa los nombres en minúscula (Eureka los guarda en MAYÚSCULA)
+          lower-case-service-id: true
+      # Rutas explícitas: lb:// = balanceo de carga usando el registro de Eureka
+      routes:
+        - id: categoria-service
+          uri: lb://categoria-service
+          predicates:
+            - Path=/api/categorias/**
+        - id: producto-service
+          uri: lb://producto-service
+          predicates:
+            - Path=/api/productos/**
+        - id: cliente-service
+          uri: lb://cliente-service
+          predicates:
+            - Path=/api/clientes/**
+        - id: pedido-service
+          uri: lb://pedido-service
+          predicates:
+            - Path=/api/pedidos/**
+
+# Registro en Eureka
+eureka:
+  client:
+    register-with-eureka: true
+    fetch-registry: true
+    service-url:
+      defaultZone: http://localhost:8761/eureka
+  instance:
+    prefer-ip-address: true
+    instance-id: ${spring.application.name}:${server.port}
+
+# Actuator: expone salud, info y las rutas cargadas en el gateway
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info,gateway
+  endpoint:
+    gateway:
+      access: unrestricted
+
+# Trazas para ver cómo el gateway enruta y elige la instancia
+logging:
+  level:
+    org.springframework.cloud.gateway: DEBUG
+    org.springframework.cloud.loadbalancer: DEBUG
